@@ -1,7 +1,7 @@
 # Pharos Testnet Season1
 分享一下 Pharos Season1 部分任务的交互脚本
 
-PS: 出现问题询问GPT为先，无法解决可到我的推特 Pharos推文下给我留言：
+PS: 出现问题询问GPT为先，无法解决可到我的推特 Pharos推文下给我留言：https://x.com/hashlmBrian/status/1948850286501773621
 
 ## ilsh_run.config 配置说明
 ```commandline
