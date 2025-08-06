@@ -1230,6 +1230,258 @@ class Pharos:
             import traceback
             traceback.print_exc()
             return None
+    async def aquaflux_claim_token(self, aqn_nft_contract_address):
+        claim_tokens_abi = [{
+            "inputs": [],
+            "name": "claimTokens",
+            "outputs": [],
+            "stateMutability": "nonpayable",
+            "type": "function"
+        }]
+        nft_contract = self.w3.eth.contract(self.w3.to_checksum_address(aqn_nft_contract_address),
+                                            abi=claim_tokens_abi)
+        est_gas = await nft_contract.functions.claimTokens().estimate_gas({
+            'from': self.w3.to_checksum_address(self.account.address)
+        })
+
+        # 随机增加 1.01 ~ 1.2 倍缓冲
+        multiple_gas = round(random.uniform(1.01, 1.2), 2)
+        gas = int(est_gas * multiple_gas)
+
+        # 获取链上 gasPrice、nonce、chainId
+        gas_price = await self.w3.eth.gas_price
+        nonce = await self.w3.eth.get_transaction_count(
+            self.w3.to_checksum_address(self.account.address),
+            'pending'
+        )
+        chain_id = await self.w3.eth.chain_id
+
+        # 构建交易
+        tx = await nft_contract.functions.claimTokens().build_transaction({
+            "from": self.w3.to_checksum_address(self.account.address),
+            "gas": gas,
+            "gasPrice": gas_price,
+            "nonce": nonce,
+            "chainId": chain_id
+        })
+
+        # 签名 + 发送
+        signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
+        tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+
+        # 等待回执
+        receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash)
+        if receipt.status == 1:
+            logger.success(
+                f"{self.index}, {self.proxy}, claim 成功: {self.w3.to_hex(tx_hash)}, block: {receipt.blockNumber}")
+            return True
+
+
+    async def pc_token_claim(self, aqn_nft_contract_address):
+        logger.info(f"{self.index}, {self.proxy}, 准备aqua nft mint第二步, pc_token claim")
+        input_data = '0x7905642a0000000000000000000000000000000000000000000000056bc75e2d63100000'
+        # 获取当前gas价格
+        gas_price = await self.w3.eth.gas_price
+
+        # 估算gas limit
+        try:
+            # 构建交易用于估算gas
+            tx_for_estimate = {
+                'from': self.w3.to_checksum_address(self.account.address),
+                'to': self.w3.to_checksum_address(aqn_nft_contract_address),
+                'data': input_data
+            }
+
+            estimated_gas = await self.w3.eth.estimate_gas(tx_for_estimate)
+            gas_limit = int(estimated_gas * round(random.uniform(1.1, 1.5), 2))  # 增加20%作为缓冲
+            # print(f"估算Gas Limit: {gas_limit}")
+            # 构建完整交易
+            transaction = {
+                'from': self.w3.to_checksum_address(self.account.address),
+                'to': self.w3.to_checksum_address(aqn_nft_contract_address),
+                'data': input_data,
+                'gas': gas_limit,
+                'gasPrice': gas_price,
+                'nonce': await self.w3.eth.get_transaction_count(
+                    self.w3.to_checksum_address(self.account.address),
+                    'pending'),
+                'chainId': await self.w3.eth.chain_id
+            }
+            # 签名交易
+            signed_txn = self.account.sign_transaction(transaction)
+
+            # 发送交易
+            tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+            # print(f"Mint交易已发送，交易哈希: {tx_hash.hex()}")
+
+            # 等待交易确认
+            receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+
+            if receipt.status == 1:
+                logger.success(
+                    f"{self.index}, {self.proxy}, mint aqua nft第二步成功！交易哈希: {tx_hash.hex()}")
+        except Exception as e:
+            logger.error(f"{self.index}, {self.proxy}, mint aqua nft第二步失败")
+
+    async def aquaflux_nft_mint(self, aquaflux_headers, aqn_nft_contract_address):
+        res = await self.session.post(url='https://api.aquaflux.pro/api/v1/users/check-token-holding',
+                                      headers=aquaflux_headers)
+        logger.info(f'{self.index}, {self.proxy}, token-holding check结果:{res.text}')
+        if res.status_code == 200:
+            if res.json()['data']['isHoldingToken']:
+                signature_url = 'https://api.aquaflux.pro/api/v1/users/get-signature'
+                payload = {"walletAddress": self.account.address, "requestedNftType": 0}
+                res = await self.session.post(url=signature_url, headers=aquaflux_headers,
+                                              json=payload)
+                logger.info(f'{self.index}, {self.proxy}, signature获取结果:{res.text}')
+                if res.status_code == 200:
+                    signature = str(res.json()['data']['signature']).removeprefix('0x')
+                    expires_at = res.json()['data']['expiresAt']
+                    input_data = '0x75e7e0530000000000000000000000000000000000000000000000000000000000000000%%%%%%%%%%%00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000041###########00000000000000000000000000000000000000000000000000000000000000'
+                    timestamp_encoded = encode_uint256(expires_at)
+                    temp_timestamp_old = '%%%%%%%%%%%'
+                    temp_signature_old = '###########'
+                    input_data = input_data.replace(temp_timestamp_old, timestamp_encoded)
+                    input_data = input_data.replace(temp_signature_old, signature)
+                    logger.info(f'{self.index}, {self.proxy}, 当前nft mint的input_data={input_data}')
+                    gas_price = await self.w3.eth.gas_price
+
+                    # 构建交易用于估算gas
+                    tx_for_estimate = {
+                        'from': self.w3.to_checksum_address(self.account.address),
+                        'to': self.w3.to_checksum_address(aqn_nft_contract_address),
+                        'data': input_data
+                    }
+                    estimated_gas = await self.w3.eth.estimate_gas(tx_for_estimate)
+
+                    gas_limit = int(estimated_gas * round(random.uniform(1.1, 1.5), 2))  # 增加20%作为缓冲
+
+                    transaction = {
+                        'from': self.w3.to_checksum_address(self.account.address),
+                        'to': self.w3.to_checksum_address(aqn_nft_contract_address),
+                        'data': input_data,
+                        'gas': gas_limit,
+                        'gasPrice': gas_price,
+                        'nonce': await self.w3.eth.get_transaction_count(
+                            self.w3.to_checksum_address(self.account.address),
+                            'pending'),
+                        'chainId': await self.w3.eth.chain_id
+                    }
+
+                    # 签名交易
+                    signed_txn = self.account.sign_transaction(transaction)
+
+                    # 发送交易
+                    tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+                    # print(f"Mint交易已发送，交易哈希: {tx_hash.hex()}")
+
+                    # 等待交易确认
+                    receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+
+                    if receipt.status == 1:
+                        logger.success(
+                            f"{self.index}, {self.proxy}, mint aqua nft最终交易成功！交易哈希: {tx_hash.hex()}")
+                        return True
+
+    async def rwa_fi(self):
+
+        P_TOKEN_ADDRESS = '0xb5d3ca5802453cc06199b9c40c855a874946a92c'
+        aqn_nft_contract_address = '0xcc8cf44e196cab28dba2d514dc7353af0efb370e'
+        PC_TOKEN_ADDRESS = '0x37eca06be40cd4ebf225bed4a99dd3491ace0044'
+        # 校验NFT是否已经mint
+        nft_minted = await self.check_nft_balance(aqn_nft_contract_address)
+        if nft_minted:
+            logger.success(f'{self.index}, {self.proxy}, aquaflux nft已经mint！')
+            return
+        # 登录aquaflux
+        t = int(time.time() * 1000)
+        message = f'Sign in to AquaFlux with timestamp: {t}'
+        aquaflux_headers = {
+            "accept": "application/json, text/plain, */*",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "zh-CN,zh;q=0.8",
+            "origin": "https://playground.aquaflux.pro",
+            "priority": "u=1, i",
+            "referer": "https://playground.aquaflux.pro/",
+            "sec-ch-ua-mobile": "?0",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "sec-gpc": "1"
+        }
+        signature = '0x' + self.account.sign_message(encode_defunct(text=message)).signature.hex()
+
+        payload = {
+            "address": self.account.address,
+            "message": message,
+            "signature": signature
+        }
+        login_url = 'https://api.aquaflux.pro/api/v1/users/wallet-login'
+        res = await self.session.post(login_url, json=payload, headers=aquaflux_headers)
+        if 'Authentication token not provided' in res.text:
+            return
+        if res.status_code == 200:
+            logger.success(f"{self.index}, {self.proxy}, aquax登录成功!")
+            access_token = res.json()['data']['accessToken']
+            aquaflux_headers.update({
+                'authorization': f'Bearer {access_token}'
+            })
+            binding_status_url = 'https://api.aquaflux.pro/api/v1/users/twitter/binding-status'
+            await self.session.get(binding_status_url, headers=aquaflux_headers)
+            await asyncio.sleep(1)
+            await self.session.get(binding_status_url, headers=aquaflux_headers)
+
+        # 如果p_token, pc_token均为0 则进行claim
+        p_token_balance, p_token_wei = await self.check_token_balance(P_TOKEN_ADDRESS)
+        pc_token_balance, pc_token_wei = await self.check_token_balance(PC_TOKEN_ADDRESS)
+        if float(pc_token_balance) == 0.0 and float(p_token_balance) == 0.0:
+            logger.info(
+                f'{self.index}, {self.proxy}, aquaflux nft尚未mint, 且pc_token, p_token均为0，进行p_token进行claim')
+            await self.aquaflux_claim_token(aqn_nft_contract_address)
+            for i in range(99):
+                p_token_balance, p_token_wei = await self.check_token_balance(P_TOKEN_ADDRESS)
+                if float(p_token_balance) == 0.0:
+                    await asyncio.sleep(random.uniform(5.8, 11.5))
+                    continue
+                else:
+                    await self.pc_token_claim(aqn_nft_contract_address)
+                    await asyncio.sleep(random.uniform(5.8, 11.5))
+                    break
+        # 如果
+        pc_token_flag = False
+        for i in range(99):
+            pc_token_balance, pc_token_wei = await self.check_token_balance(PC_TOKEN_ADDRESS)
+            if float(pc_token_balance) == 0.0:
+                logger.info(f'{self.index}, {self.proxy}, pc_token为0, 准备claim pc token')
+                await asyncio.sleep(random.uniform(5.8, 11.5))
+                p_token_balance, p_token_wei = await self.check_token_balance(P_TOKEN_ADDRESS)
+                # todo check-point
+                if float(p_token_balance) == 0.0:
+                    await self.pc_token_claim(aqn_nft_contract_address)
+                    await asyncio.sleep(random.uniform(5.8, 11.5))
+                    continue
+            else:
+                logger.info(f'{self.index}, {self.proxy}, pc_token不为0, 退出，准备nft的mint')
+                pc_token_flag = True
+                break
+        if pc_token_flag:
+            for i in range(99):
+                pc_token_balance, pc_token_wei = await self.check_token_balance(PC_TOKEN_ADDRESS)
+                if float(pc_token_balance) > 0.0:
+                    logger.info(f'{self.index}, {self.proxy}, pc_token 不为0, 准备nft 的mint')
+                    nft_mint_flag = await self.aquaflux_nft_mint(aquaflux_headers, aqn_nft_contract_address)
+                    await asyncio.sleep(random.uniform(5.8, 11.5))
+                    if nft_mint_flag:
+                        if await self.check_nft_balance(aqn_nft_contract_address):
+                            logger.success(f'{self.index}, {self.proxy}, aquaflux nft mint 已成功!')
+                            await asyncio.sleep(random.uniform(5.8, 11.5))
+                            return
+                else:
+                    if await self.check_nft_balance(aqn_nft_contract_address):
+                        logger.success(f'{self.index}, {self.proxy}, aquaflux nft mint 已成功!')
+                        return
+                    else:
+                        await asyncio.sleep(random.uniform(5.8, 11.5))
 
     async def auto(self):
         """
@@ -1251,6 +1503,9 @@ class Pharos:
                 await self.mint()
                 await self.mint_pharos_badge2()
                 await self.mint_pharos_badge_zentra()
+
+            if self.ilsh['rwa_fi']:
+                await self.rwa_fi()
             # # await self.mint_faro_badge()
             # #
             await self.profile()
